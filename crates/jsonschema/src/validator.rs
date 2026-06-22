@@ -4,6 +4,7 @@
 use crate::{
     error::{error, no_error, ErrorIterator},
     evaluation::{Annotations, ErrorDescription, Evaluation, EvaluationNode},
+    instance::InstanceRef,
     node::SchemaNode,
     paths::{LazyLocation, Location, RefTracker},
     Draft, ValidationError, ValidationOptions,
@@ -32,7 +33,12 @@ impl ValidationContext {
     /// Returns `true` if cycle detected.
     #[inline]
     pub(crate) fn enter(&mut self, node_id: usize, instance: &Value) -> bool {
-        let key = (node_id, std::ptr::from_ref::<Value>(instance) as usize);
+        self.enter_instance(node_id, InstanceRef::from_serde(instance))
+    }
+
+    #[inline]
+    pub(crate) fn enter_instance(&mut self, node_id: usize, instance: InstanceRef<'_>) -> bool {
+        let key = (node_id, instance.identity());
         if self.validating.contains(&key) {
             return true;
         }
@@ -42,7 +48,12 @@ impl ValidationContext {
 
     #[inline]
     pub(crate) fn exit(&mut self, node_id: usize, instance: &Value) {
-        let key = (node_id, std::ptr::from_ref::<Value>(instance) as usize);
+        self.exit_instance(node_id, InstanceRef::from_serde(instance));
+    }
+
+    #[inline]
+    pub(crate) fn exit_instance(&mut self, node_id: usize, instance: InstanceRef<'_>) {
+        let key = (node_id, instance.identity());
         let popped = self.validating.pop();
         debug_assert_eq!(
             popped,
@@ -54,21 +65,40 @@ impl ValidationContext {
     /// Only caches arrays/objects to avoid false hits from stack address reuse.
     #[inline]
     pub(crate) fn get_cached_result(&self, node_id: usize, instance: &Value) -> Option<bool> {
-        if !matches!(instance, Value::Array(_) | Value::Object(_)) {
+        self.get_cached_instance_result(node_id, InstanceRef::from_serde(instance))
+    }
+
+    #[inline]
+    pub(crate) fn get_cached_instance_result(
+        &self,
+        node_id: usize,
+        instance: InstanceRef<'_>,
+    ) -> Option<bool> {
+        if !instance.is_array() && !instance.is_object() {
             return None;
         }
         let cache = self.is_valid_cache.as_ref()?;
-        let key = (node_id, std::ptr::from_ref::<Value>(instance) as usize);
+        let key = (node_id, instance.identity());
         cache.get(&key).copied()
     }
 
     /// Only caches arrays/objects to avoid false hits from stack address reuse.
     #[inline]
     pub(crate) fn cache_result(&mut self, node_id: usize, instance: &Value, result: bool) {
-        if !matches!(instance, Value::Array(_) | Value::Object(_)) {
+        self.cache_instance_result(node_id, InstanceRef::from_serde(instance), result);
+    }
+
+    #[inline]
+    pub(crate) fn cache_instance_result(
+        &mut self,
+        node_id: usize,
+        instance: InstanceRef<'_>,
+        result: bool,
+    ) {
+        if !instance.is_array() && !instance.is_object() {
             return;
         }
-        let key = (node_id, std::ptr::from_ref::<Value>(instance) as usize);
+        let key = (node_id, instance.identity());
         self.is_valid_cache
             .get_or_insert_with(AHashMap::new)
             .insert(key, result);
@@ -122,6 +152,22 @@ pub(crate) trait Validate: Send + Sync {
     }
 
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool;
+
+    /// Run flag validation against a borrowed instance representation.
+    ///
+    /// Validators may override this method to inspect the borrowed value
+    /// directly. Extension validators retain correct behavior through the
+    /// allocation-backed default.
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        if let Some(instance) = instance.as_serde() {
+            self.is_valid(instance, ctx)
+        } else {
+            // The materialized value is temporary. Its address can be reused by
+            // a later fallback, so it must not share pointer-identity caches
+            // with the surrounding borrowed-instance traversal.
+            self.is_valid(&instance.to_owned(), &mut ValidationContext::new())
+        }
+    }
 
     fn validate<'i>(
         &self,
@@ -365,6 +411,18 @@ impl Validator {
     pub fn is_valid(&self, instance: &Value) -> bool {
         let mut ctx = ValidationContext::new();
         self.root.is_valid(instance, &mut ctx)
+    }
+
+    /// Validate a borrowed JSON instance without requiring a
+    /// `serde_json::Value` tree.
+    #[must_use]
+    #[inline]
+    pub fn is_valid_instance(&self, instance: InstanceRef<'_>) -> bool {
+        if !instance.is_json() {
+            return false;
+        }
+        let mut ctx = ValidationContext::new();
+        self.root.is_valid_instance(instance, &mut ctx)
     }
     /// Evaluate the schema and expose structured output formats.
     #[must_use]

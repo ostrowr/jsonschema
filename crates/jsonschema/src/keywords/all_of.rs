@@ -5,6 +5,7 @@ use crate::{
     paths::{LazyLocation, Location, RefTracker},
     types::JsonType,
     validator::{EvaluationResult, Validate, ValidationContext},
+    InstanceRef,
 };
 use serde_json::{Map, Value};
 
@@ -34,6 +35,12 @@ impl AllOfValidator {
 impl Validate for AllOfValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
         self.schemas.iter().all(|n| n.is_valid(instance, ctx))
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        self.schemas
+            .iter()
+            .all(|node| node.is_valid_instance(instance, ctx))
     }
 
     fn validate<'i>(
@@ -97,6 +104,10 @@ impl SingleValueAllOfValidator {
 impl Validate for SingleValueAllOfValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
         self.node.is_valid(instance, ctx)
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        self.node.is_valid_instance(instance, ctx)
     }
 
     fn validate<'i>(

@@ -6,6 +6,7 @@ use crate::{
     paths::{LazyLocation, Location, RefTracker},
     types::{JsonType, JsonTypeSet},
     validator::{Validate, ValidationContext},
+    InstanceRef,
 };
 use ahash::AHashSet;
 use serde_json::{Map, Value};
@@ -72,6 +73,11 @@ impl Validate for EnumValidator {
             false
         }
     }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        self.types.contains_instance_type(instance)
+            && self.items.iter().any(|item| instance.equals(item))
+    }
 }
 
 #[derive(Debug)]
@@ -119,6 +125,10 @@ impl Validate for SingleValueEnumValidator {
 
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
         cmp::equal(&self.value, instance)
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.equals(&self.value)
     }
 }
 
@@ -176,6 +186,12 @@ impl Validate for SmallStringEnumValidator {
             false
         }
     }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_str()
+            .is_some_and(|value| self.items.iter().any(|item| item.as_ref() == value))
+    }
 }
 
 #[derive(Debug)]
@@ -231,6 +247,12 @@ impl Validate for BigStringEnumValidator {
         } else {
             false
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_str()
+            .is_some_and(|value| self.items.contains(value))
     }
 }
 

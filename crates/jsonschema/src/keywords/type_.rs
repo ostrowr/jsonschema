@@ -6,6 +6,7 @@ use crate::{
     paths::Location,
     types::{JsonType, JsonTypeSet},
     validator::{EvaluationResult, Validate, ValidationContext},
+    InstanceRef,
 };
 use serde_json::{json, Map, Number, Value};
 use std::str::FromStr;
@@ -57,6 +58,9 @@ impl Validate for MultipleTypesValidator {
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
         self.types.contains_value_type(instance)
     }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        self.types.contains_instance_type(instance)
+    }
     fn validate<'i>(
         &self,
         instance: &'i Value,
@@ -105,6 +109,9 @@ impl NullTypeValidator {
 
 impl Validate for NullTypeValidator {
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
+        instance.is_null()
+    }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
         instance.is_null()
     }
     fn validate<'i>(
@@ -159,6 +166,9 @@ impl Validate for BooleanTypeValidator {
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
         instance.is_boolean()
     }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.is_boolean()
+    }
     fn validate<'i>(
         &self,
         instance: &'i Value,
@@ -209,6 +219,9 @@ impl StringTypeValidator {
 
 impl Validate for StringTypeValidator {
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
+        instance.is_string()
+    }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
         instance.is_string()
     }
 
@@ -264,6 +277,9 @@ impl Validate for ArrayTypeValidator {
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
         instance.is_array()
     }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.is_array()
+    }
 
     fn validate<'i>(
         &self,
@@ -317,6 +333,9 @@ impl Validate for ObjectTypeValidator {
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
         instance.is_object()
     }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.is_object()
+    }
     fn validate<'i>(
         &self,
         instance: &'i Value,
@@ -367,6 +386,9 @@ impl NumberTypeValidator {
 
 impl Validate for NumberTypeValidator {
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
+        instance.is_number()
+    }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
         instance.is_number()
     }
     fn validate<'i>(
@@ -424,6 +446,11 @@ impl Validate for IntegerTypeValidator {
         } else {
             false
         }
+    }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_number()
+            .is_some_and(crate::NumberRef::is_integer)
     }
     fn validate<'i>(
         &self,

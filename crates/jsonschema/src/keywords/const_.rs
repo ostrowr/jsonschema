@@ -5,6 +5,7 @@ use crate::{
     keywords::CompilationResult,
     paths::Location,
     validator::{Validate, ValidationContext},
+    InstanceRef,
 };
 use serde_json::{Map, Number, Value};
 
@@ -52,6 +53,10 @@ impl Validate for ConstArrayValidator {
             false
         }
     }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.equals_array(&self.value)
+    }
 }
 
 struct ConstBooleanValidator {
@@ -93,6 +98,10 @@ impl Validate for ConstBooleanValidator {
             false
         }
     }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.as_bool() == Some(self.value)
+    }
 }
 
 struct ConstNullValidator {
@@ -125,6 +134,9 @@ impl Validate for ConstNullValidator {
     }
     #[inline]
     fn is_valid(&self, instance: &Value, _ctx: &mut ValidationContext) -> bool {
+        instance.is_null()
+    }
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
         instance.is_null()
     }
 }
@@ -174,6 +186,12 @@ impl Validate for ConstNumberValidator {
             false
         }
     }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_number()
+            .is_some_and(|value| value.equals_serde(&self.original_value))
+    }
 }
 
 pub(crate) struct ConstObjectValidator {
@@ -220,6 +238,10 @@ impl Validate for ConstObjectValidator {
             false
         }
     }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.equals_object(&self.value)
+    }
 }
 
 pub(crate) struct ConstStringValidator {
@@ -265,6 +287,10 @@ impl Validate for ConstStringValidator {
         } else {
             false
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.as_str() == Some(self.value.as_str())
     }
 }
 

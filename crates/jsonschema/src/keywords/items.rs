@@ -7,7 +7,7 @@ use crate::{
     paths::{LazyLocation, Location, RefTracker},
     types::JsonType,
     validator::{EvaluationResult, Validate, ValidationContext},
-    Draft, ValidationError,
+    Draft, InstanceRef, ValidationError,
 };
 use serde_json::{Map, Value};
 
@@ -42,6 +42,15 @@ impl Validate for ItemsArrayValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        instance.as_array().is_none_or(|items| {
+            items
+                .iter()
+                .zip(&self.items)
+                .all(|(item, node)| node.is_valid_instance(item, ctx))
+        })
     }
 
     fn validate<'i>(
@@ -115,6 +124,14 @@ impl Validate for ItemsObjectValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        instance.as_array().is_none_or(|items| {
+            items
+                .iter()
+                .all(|item| self.node.is_valid_instance(item, ctx))
+        })
     }
 
     fn validate<'i>(
@@ -212,6 +229,15 @@ impl Validate for ItemsObjectSkipPrefixValidator {
         }
     }
 
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        instance.as_array().is_none_or(|items| {
+            items
+                .iter()
+                .skip(self.skip_prefix)
+                .all(|item| self.node.is_valid_instance(item, ctx))
+        })
+    }
+
     fn validate<'i>(
         &self,
         instance: &'i Value,
@@ -298,6 +324,12 @@ impl Validate for ItemsNumberTypeValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_array()
+            .is_none_or(|items| items.iter().all(InstanceRef::is_number))
     }
 
     fn validate<'i>(
@@ -405,6 +437,12 @@ impl Validate for ItemsStringTypeValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_array()
+            .is_none_or(|items| items.iter().all(InstanceRef::is_string))
     }
 
     fn validate<'i>(
@@ -518,6 +556,14 @@ impl Validate for ItemsIntegerTypeValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.as_array().is_none_or(|items| {
+            items
+                .iter()
+                .all(|item| item.as_number().is_some_and(crate::NumberRef::is_integer))
+        })
     }
 
     fn validate<'i>(
@@ -773,6 +819,12 @@ impl Validate for ItemsBooleanTypeValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_array()
+            .is_none_or(|items| items.iter().all(InstanceRef::is_boolean))
     }
 
     fn validate<'i>(

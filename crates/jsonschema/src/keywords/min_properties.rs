@@ -6,6 +6,7 @@ use crate::{
     keywords::{helpers::fail_on_non_positive_integer, CompilationResult},
     paths::{LazyLocation, Location, RefTracker},
     validator::{Validate, ValidationContext},
+    InstanceRef,
 };
 use serde_json::{Map, Value};
 
@@ -48,6 +49,12 @@ impl Validate for MinPropertiesValidator {
             }
         }
         true
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_object()
+            .is_none_or(|properties| (properties.len() as u64) >= self.limit)
     }
 
     fn validate<'i>(

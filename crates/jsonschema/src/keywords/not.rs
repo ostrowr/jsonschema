@@ -5,6 +5,7 @@ use crate::{
     node::SchemaNode,
     paths::{LazyLocation, RefTracker},
     validator::{Validate, ValidationContext},
+    InstanceRef,
 };
 use serde_json::{Map, Value};
 
@@ -28,6 +29,10 @@ impl NotValidator {
 impl Validate for NotValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
         !self.node.is_valid(instance, ctx)
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        !self.node.is_valid_instance(instance, ctx)
     }
 
     fn validate<'i>(

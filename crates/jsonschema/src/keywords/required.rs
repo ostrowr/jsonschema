@@ -5,6 +5,7 @@ use crate::{
     paths::{LazyLocation, Location, RefTracker},
     types::JsonType,
     validator::{Validate, ValidationContext},
+    InstanceRef,
 };
 use serde_json::{Map, Value};
 
@@ -47,6 +48,17 @@ impl Validate for RequiredValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        let Some(properties) = instance.as_object() else {
+            return true;
+        };
+        properties.len() >= self.required.len()
+            && self
+                .required
+                .iter()
+                .all(|property| properties.contains_key(property))
     }
 
     fn validate<'i>(
@@ -145,6 +157,12 @@ impl Validate for SingleItemRequiredValidator {
             true
         }
     }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance
+            .as_object()
+            .is_none_or(|properties| properties.contains_key(&self.value))
+    }
 }
 
 /// Specialized validator for exactly 2 required properties.
@@ -178,6 +196,14 @@ impl Validate for Required2Validator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.as_object().is_none_or(|properties| {
+            properties.len() >= 2
+                && properties.contains_key(&self.first)
+                && properties.contains_key(&self.second)
+        })
     }
 
     fn validate<'i>(
@@ -283,6 +309,15 @@ impl Validate for Required3Validator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.as_object().is_none_or(|properties| {
+            properties.len() >= 3
+                && properties.contains_key(&self.first)
+                && properties.contains_key(&self.second)
+                && properties.contains_key(&self.third)
+        })
     }
 
     fn validate<'i>(

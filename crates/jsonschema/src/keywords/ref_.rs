@@ -6,7 +6,7 @@ use crate::{
     paths::{LazyLocation, Location, RefTracker},
     types::JsonType,
     validator::{EvaluationResult, Validate, ValidationContext},
-    ValidationError,
+    InstanceRef, ValidationError,
 };
 use serde_json::{Map, Value};
 
@@ -27,6 +27,10 @@ struct RefValidator {
 impl Validate for RefValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
         self.inner.is_valid(instance, ctx)
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        self.inner.is_valid_instance(instance, ctx)
     }
 
     fn validate<'i>(
@@ -86,6 +90,10 @@ struct DirectRefValidator {
 impl Validate for DirectRefValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
         self.inner.is_valid(instance, ctx)
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        self.inner.is_valid_instance(instance, ctx)
     }
 
     fn validate<'i>(

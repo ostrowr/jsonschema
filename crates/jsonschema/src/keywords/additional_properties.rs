@@ -22,6 +22,7 @@ use crate::{
     regex::RegexEngine,
     types::JsonType,
     validator::{EvaluationResult, Validate, ValidationContext},
+    InstanceRef,
 };
 use ahash::AHashMap;
 use referencing::Uri;
@@ -62,6 +63,14 @@ impl Validate for AdditionalPropertiesValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        instance.as_object().is_none_or(|properties| {
+            properties
+                .values()
+                .all(|value| self.node.is_valid_instance(value, ctx))
+        })
     }
 
     fn validate<'i>(
@@ -165,6 +174,10 @@ impl Validate for AdditionalPropertiesFalseValidator {
         }
     }
 
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, _ctx: &mut ValidationContext) -> bool {
+        instance.as_object().is_none_or(crate::ObjectRef::is_empty)
+    }
+
     fn validate<'i>(
         &self,
         instance: &'i Value,
@@ -239,6 +252,17 @@ impl<M: PropertiesValidatorsMap> Validate for AdditionalPropertiesNotEmptyFalseV
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        let Some(properties) = instance.as_object() else {
+            return true;
+        };
+        properties.iter().all(|(property, value)| {
+            self.properties
+                .get_validator(property)
+                .is_some_and(|node| node.is_valid_instance(value, ctx))
+        })
     }
 
     fn validate<'i>(
@@ -414,6 +438,26 @@ impl<M: PropertiesValidatorsMap> Validate
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        let Some(properties) = instance.as_object() else {
+            return true;
+        };
+        if properties.is_empty() {
+            return false;
+        }
+        let mut found_required = false;
+        for (property, value) in properties {
+            let Some(node) = self.properties.get_validator(property) else {
+                return false;
+            };
+            if !node.is_valid_instance(value, ctx) {
+                return false;
+            }
+            found_required |= property == self.required;
+        }
+        found_required
     }
 
     fn validate<'i>(
@@ -623,6 +667,19 @@ impl<M: PropertiesValidatorsMap> Validate for AdditionalPropertiesNotEmptyValida
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        let Some(properties) = instance.as_object() else {
+            return true;
+        };
+        properties.iter().all(|(property, value)| {
+            if let Some(node) = self.properties.get_validator(property) {
+                node.is_valid_instance(value, ctx)
+            } else {
+                self.node.is_valid_instance(value, ctx)
+            }
+        })
     }
 
     fn validate<'i>(

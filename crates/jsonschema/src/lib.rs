@@ -866,6 +866,7 @@ mod evaluation;
 #[doc(hidden)]
 pub mod ext;
 mod http;
+pub mod instance;
 mod keywords;
 mod node;
 mod options;
@@ -884,6 +885,7 @@ pub use evaluation::{
     AnnotationEntry, ErrorEntry, Evaluation, FlagOutput, HierarchicalOutput, ListOutput,
 };
 pub use http::HttpOptions;
+pub use instance::{ArrayRef, InstanceRef, NumberRef, ObjectRef};
 pub use keywords::custom::Keyword;
 pub use options::{EmailOptions, FancyRegex, PatternOptions, Regex, ValidationOptions};
 pub use referencing::{

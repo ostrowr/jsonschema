@@ -5,7 +5,7 @@ use crate::{
     keywords::{BoxedValidator, Keyword},
     paths::{LazyLocation, Location, RefTracker},
     validator::{EvaluationResult, Validate, ValidationContext},
-    ValidationError,
+    InstanceRef, ValidationError,
 };
 use referencing::Uri;
 use serde_json::Value;
@@ -176,6 +176,20 @@ impl Validate for PendingSchemaNode {
         ctx.exit(node_id, instance);
         // Cache result for recursive schemas
         ctx.cache_result(node_id, instance, result);
+        result
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        let node_id = self.node_id();
+        if let Some(cached) = ctx.get_cached_instance_result(node_id, instance) {
+            return cached;
+        }
+        if ctx.enter_instance(node_id, instance) {
+            return true;
+        }
+        let result = self.with_node(|node| node.is_valid_instance(instance, ctx));
+        ctx.exit_instance(node_id, instance);
+        ctx.cache_instance_result(node_id, instance, result);
         result
     }
 
@@ -477,6 +491,23 @@ impl Validate for SchemaNode {
             NodeValidators::Array { validators } => validators
                 .iter()
                 .all(|entry| entry.validator.is_valid(instance, ctx)),
+            NodeValidators::Boolean { validator: Some(_) } => false,
+            NodeValidators::Boolean { validator: None } => true,
+        }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        match self.validators.as_ref() {
+            NodeValidators::Keyword(kvs) if kvs.validators.len() == 1 => {
+                kvs.validators[0].validator.is_valid_instance(instance, ctx)
+            }
+            NodeValidators::Keyword(kvs) => kvs
+                .validators
+                .iter()
+                .all(|entry| entry.validator.is_valid_instance(instance, ctx)),
+            NodeValidators::Array { validators } => validators
+                .iter()
+                .all(|entry| entry.validator.is_valid_instance(instance, ctx)),
             NodeValidators::Boolean { validator: Some(_) } => false,
             NodeValidators::Boolean { validator: None } => true,
         }

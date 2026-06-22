@@ -8,6 +8,8 @@ use std::str::FromStr;
 
 use serde_json::Value;
 
+use crate::InstanceRef;
+
 /// Represents a JSON value type.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 #[repr(u8)]
@@ -205,6 +207,29 @@ impl JsonTypeSet {
             }
             Value::Object(_) => self.contains(JsonType::Object),
             Value::String(_) => self.contains(JsonType::String),
+        }
+    }
+
+    /// Check whether this set includes the type of a borrowed instance.
+    #[must_use]
+    pub fn contains_instance_type(self, value: InstanceRef<'_>) -> bool {
+        if value.is_array() {
+            self.contains(JsonType::Array)
+        } else if value.is_boolean() {
+            self.contains(JsonType::Boolean)
+        } else if value.is_null() {
+            self.contains(JsonType::Null)
+        } else if let Some(number) = value.as_number() {
+            if number.is_integer() {
+                self.contains(JsonType::Integer) || self.contains(JsonType::Number)
+            } else {
+                self.contains(JsonType::Number)
+            }
+        } else if value.is_object() {
+            self.contains(JsonType::Object)
+        } else {
+            debug_assert!(value.is_string());
+            self.contains(JsonType::String)
         }
     }
     /// Get an iterator over the types in this set.

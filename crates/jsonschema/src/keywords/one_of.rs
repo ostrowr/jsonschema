@@ -7,6 +7,7 @@ use crate::{
     paths::{LazyLocation, Location, RefTracker},
     types::JsonType,
     validator::{EvaluationResult, Validate, ValidationContext},
+    InstanceRef,
 };
 use serde_json::{Map, Value};
 
@@ -60,6 +61,29 @@ impl OneOfValidator {
             .skip(idx + 1)
             .any(|n| n.is_valid(instance, ctx))
     }
+
+    fn get_first_valid_instance(
+        &self,
+        instance: InstanceRef<'_>,
+        ctx: &mut ValidationContext,
+    ) -> Option<usize> {
+        self.schemas
+            .iter()
+            .position(|node| node.is_valid_instance(instance, ctx))
+    }
+
+    #[allow(clippy::arithmetic_side_effects)]
+    fn are_other_instances_valid(
+        &self,
+        instance: InstanceRef<'_>,
+        index: usize,
+        ctx: &mut ValidationContext,
+    ) -> bool {
+        self.schemas
+            .iter()
+            .skip(index + 1)
+            .any(|node| node.is_valid_instance(instance, ctx))
+    }
 }
 
 /// Optimized validator for `oneOf` with a single subschema.
@@ -85,6 +109,10 @@ impl SingleOneOfValidator {
 impl Validate for SingleOneOfValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
         self.node.is_valid(instance, ctx)
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        self.node.is_valid_instance(instance, ctx)
     }
 
     fn validate<'i>(
@@ -128,6 +156,11 @@ impl Validate for OneOfValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
         let first_valid_idx = self.get_first_valid(instance, ctx);
         first_valid_idx.is_some_and(|idx| !self.are_others_valid(instance, idx, ctx))
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        self.get_first_valid_instance(instance, ctx)
+            .is_some_and(|index| !self.are_other_instances_valid(instance, index, ctx))
     }
 
     fn validate<'i>(

@@ -8,6 +8,7 @@ use crate::{
     properties::HASHMAP_THRESHOLD,
     types::JsonType,
     validator::{EvaluationResult, Validate, ValidationContext},
+    InstanceRef,
 };
 use ahash::AHashMap;
 use serde_json::{Map, Value};
@@ -110,6 +111,17 @@ impl Validate for SmallPropertiesValidator {
         }
     }
 
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        let Some(properties) = instance.as_object() else {
+            return true;
+        };
+        self.properties.iter().all(|(name, node)| {
+            properties
+                .get(name)
+                .is_none_or(|value| node.is_valid_instance(value, ctx))
+        })
+    }
+
     fn validate<'i>(
         &self,
         instance: &'i Value,
@@ -195,6 +207,20 @@ impl Validate for SmallPropertiesWithRequired2Validator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        let Some(properties) = instance.as_object() else {
+            return true;
+        };
+        properties.len() >= 2
+            && properties.contains_key(&self.first)
+            && properties.contains_key(&self.second)
+            && self.properties.iter().all(|(name, node)| {
+                properties
+                    .get(name)
+                    .is_none_or(|value| node.is_valid_instance(value, ctx))
+            })
     }
 
     fn validate<'i>(
@@ -323,6 +349,17 @@ impl Validate for BigPropertiesValidator {
         } else {
             true
         }
+    }
+
+    fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        let Some(properties) = instance.as_object() else {
+            return true;
+        };
+        properties.iter().all(|(name, value)| {
+            self.properties
+                .get(name)
+                .is_none_or(|node| node.is_valid_instance(value, ctx))
+        })
     }
 
     fn validate<'i>(

@@ -27,6 +27,12 @@ tls-aws-lc-rs = ["rustls/aws-lc-rs"]
 tls-ring = ["rustls/ring"]
 # Support for arbitrarily large integers and exact decimal values when parsing JSON from strings.
 arbitrary-precision = ["serde_json/arbitrary_precision", "dep:num-bigint"]
+# Validate borrowed values parsed by jiter without first materializing a
+# serde_json::Value tree.
+jiter = ["dep:jiter", "dep:num-bigint"]
+# Validate Python JSON values in place. This is kept optional so the core Rust
+# crate does not acquire a Python runtime dependency by default.
+python = ["dep:num-bigint", "dep:pyo3"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Use rustls-no-provider to allow manual selection of crypto backend
@@ -57,10 +63,12 @@ fraction = { version = "0.15", default-features = false, features = [
 ] }
 idna = "1.0.2"
 itoa = "1"
+jiter = { version = "0.15", optional = true }
 num-bigint = { version = "0.4", optional = true }
 num-cmp = "0.1"
 num-traits = "0.2.19"
 percent-encoding = "2.3"
+pyo3 = { version = "0.28", optional = true }
 referencing = { version = "0.45.0", path = "../jsonschema-referencing" }
 regex = "1.11.1"
 regex-syntax = "0.8.5"
