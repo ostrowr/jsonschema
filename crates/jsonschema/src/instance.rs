@@ -155,6 +155,17 @@ pub enum ProjectedPythonKind<'a> {
 /// beyond the root [`InstanceRef`] lifetime.
 #[cfg(feature = "python")]
 pub trait PythonInstanceProvider {
+    /// Return the exact schema this projected value has already satisfied.
+    ///
+    /// The validator may use this proof to skip an identical `$ref` target.
+    /// Implementations must return `Some` only when the logical projected
+    /// value was successfully validated with equivalent dialect, vocabulary,
+    /// reference-resolution, format, and custom-keyword semantics. Surrounding
+    /// and adjacent constraints are still evaluated normally.
+    fn prevalidated_schema<'a>(&'a self, _value: ProjectedPythonValue<'a>) -> Option<&'a Value> {
+        None
+    }
+
     /// Resolve a value to its logical JSON shape.
     fn project<'a>(&'a self, value: ProjectedPythonValue<'a>) -> ProjectedPythonKind<'a>;
 
@@ -292,6 +303,17 @@ impl<'a> InstanceRef<'a> {
             InstanceRepr::Python(_) => None,
             #[cfg(feature = "python")]
             InstanceRepr::ProjectedPython(_) => None,
+        }
+    }
+
+    /// Return a provider-issued proof for a projected Python value.
+    #[cfg(feature = "python")]
+    pub(crate) fn prevalidated_schema(self) -> Option<&'a Value> {
+        match self.repr {
+            InstanceRepr::ProjectedPython(value) => value.provider.prevalidated_schema(value.value),
+            InstanceRepr::Serde(_) | InstanceRepr::Python(_) => None,
+            #[cfg(feature = "jiter")]
+            InstanceRepr::Jiter(_) => None,
         }
     }
 
@@ -1468,6 +1490,9 @@ fn jiter_to_serde(value: &jiter::JsonValue<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "python")]
+    use std::cell::Cell;
+
+    #[cfg(feature = "python")]
     use pyo3::{
         ffi,
         prelude::*,
@@ -1560,6 +1585,53 @@ mod tests {
                 ffi::PyTuple_GetItem(tuple.as_ptr(), index)
             })
             .map(|child| (key, child))
+        }
+    }
+
+    #[cfg(feature = "python")]
+    struct PrevalidatedTupleProjection {
+        inner: TupleProjection,
+        schema: Value,
+        project_calls: Cell<usize>,
+    }
+
+    #[cfg(feature = "python")]
+    impl PythonInstanceProvider for PrevalidatedTupleProjection {
+        fn prevalidated_schema<'a>(&'a self, value: ProjectedPythonValue<'a>) -> Option<&'a Value> {
+            (value.node() == 0).then_some(&self.schema)
+        }
+
+        fn project<'a>(&'a self, value: ProjectedPythonValue<'a>) -> ProjectedPythonKind<'a> {
+            self.project_calls.set(self.project_calls.get() + 1);
+            self.inner.project(value)
+        }
+
+        fn array_len(&self, value: ProjectedPythonValue<'_>) -> usize {
+            self.inner.array_len(value)
+        }
+
+        fn array_get<'a>(
+            &'a self,
+            value: ProjectedPythonValue<'a>,
+            index: usize,
+        ) -> Option<ProjectedPythonValue<'a>> {
+            self.inner.array_get(value, index)
+        }
+
+        fn object_len(&self, value: ProjectedPythonValue<'_>) -> usize {
+            self.inner.object_len(value)
+        }
+
+        fn object_keys_are_strings(&self, value: ProjectedPythonValue<'_>) -> bool {
+            self.inner.object_keys_are_strings(value)
+        }
+
+        fn object_next<'a>(
+            &'a self,
+            value: ProjectedPythonValue<'a>,
+            state: &mut [usize; 2],
+        ) -> Option<(&'a str, ProjectedPythonValue<'a>)> {
+            self.inner.object_next(value, state)
         }
     }
 
@@ -1757,6 +1829,81 @@ mod tests {
             let cycle = PyList::empty(py);
             cycle.append(&cycle).unwrap();
             assert!(!InstanceRef::from_projected_python(&cycle, 2, &provider).is_json());
+        });
+    }
+
+    #[cfg(feature = "python")]
+    #[test]
+    fn projected_python_prevalidation_skips_only_an_exact_ref_target() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let target = json!({
+                "type": "object",
+                "required": ["name", "values"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "values": {
+                        "type": "array",
+                        "minItems": 2,
+                        "items": {"type": "integer", "minimum": 0}
+                    }
+                },
+                "additionalProperties": false
+            });
+            let schema = json!({
+                "$defs": {"target": target.clone()},
+                "$ref": "#/$defs/target"
+            });
+            let validator = crate::draft202012::options().build(&schema).unwrap();
+            let provider = PrevalidatedTupleProjection {
+                inner: TupleProjection { string_keys: true },
+                schema: target.clone(),
+                project_calls: Cell::new(0),
+            };
+            let valid = PyTuple::new(
+                py,
+                [
+                    PyString::new(py, "Ada").into_any(),
+                    PyList::new(py, [1, 2]).unwrap().into_any(),
+                ],
+            )
+            .unwrap();
+            assert!(
+                validator.is_valid_instance_assuming_json(InstanceRef::from_projected_python(
+                    &valid, 0, &provider
+                ))
+            );
+            assert_eq!(provider.project_calls.get(), 0);
+
+            let constrained_schema = json!({
+                "$defs": {"target": target.clone()},
+                "$ref": "#/$defs/target",
+                "maxProperties": 1
+            });
+            let constrained = crate::draft202012::options()
+                .build(&constrained_schema)
+                .unwrap();
+            assert!(!constrained.is_valid_instance_assuming_json(
+                InstanceRef::from_projected_python(&valid, 0, &provider)
+            ));
+
+            let invalid = PyTuple::new(
+                py,
+                [
+                    PyString::new(py, "").into_any(),
+                    PyList::new(py, [1, -1]).unwrap().into_any(),
+                ],
+            )
+            .unwrap();
+            let mismatched_provider = PrevalidatedTupleProjection {
+                inner: TupleProjection { string_keys: true },
+                schema: json!({"type": "object"}),
+                project_calls: Cell::new(0),
+            };
+            assert!(!validator.is_valid_instance_assuming_json(
+                InstanceRef::from_projected_python(&invalid, 0, &mismatched_provider)
+            ));
+            assert!(mismatched_provider.project_calls.get() > 0);
         });
     }
 

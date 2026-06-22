@@ -87,6 +87,8 @@ struct SharedContextState {
     pending_items_validators_by_schema:
         SharedCache<ItemsValidatorsPendingKey, PendingItemsValidators>,
     pattern_cache: SharedCache<Arc<str>, PatternCacheEntry>,
+    #[cfg(feature = "python")]
+    referenced_schemas: SharedCache<Arc<Uri<String>>, Arc<Value>>,
     uri_buffer: Rc<RefCell<String>>,
 }
 
@@ -110,6 +112,8 @@ impl SharedContextState {
             pending_items_validators: Rc::new(RefCell::new(AHashMap::new())),
             pending_items_validators_by_schema: Rc::new(RefCell::new(AHashMap::new())),
             pattern_cache: Rc::new(RefCell::new(AHashMap::new())),
+            #[cfg(feature = "python")]
+            referenced_schemas: Rc::new(RefCell::new(AHashMap::new())),
             uri_buffer: Rc::new(RefCell::new(String::new())),
         }
     }
@@ -361,6 +365,21 @@ impl<'a> Context<'a> {
     ) -> Result<Arc<Uri<String>>, referencing::Error> {
         self.resolver
             .resolve_against(&self.resolver.base_uri().borrow(), reference)
+    }
+
+    /// Retain one exact target schema per resolved `$ref` URI for projected
+    /// Python prevalidation proofs.
+    #[cfg(feature = "python")]
+    pub(crate) fn referenced_schema(&self, uri: Arc<Uri<String>>, schema: &Value) -> Arc<Value> {
+        if let Some(cached) = self.shared.referenced_schemas.borrow().get(&uri) {
+            return Arc::clone(cached);
+        }
+        let schema = Arc::new(schema.clone());
+        self.shared
+            .referenced_schemas
+            .borrow_mut()
+            .insert(uri, Arc::clone(&schema));
+        schema
     }
 
     pub(crate) fn cached_location_node(&self, key: &LocationCacheKey) -> Option<SchemaNode> {
