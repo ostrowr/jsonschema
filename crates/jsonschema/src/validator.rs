@@ -436,6 +436,20 @@ impl Validator {
         self.is_valid_instance_assuming_json(instance)
     }
 
+    /// Validate a borrowed representation with reusable state.
+    #[must_use]
+    #[inline]
+    pub fn is_valid_instance_with_context(
+        &self,
+        instance: InstanceRef<'_>,
+        context: &mut ValidationContext,
+    ) -> bool {
+        if !instance.is_json() {
+            return false;
+        }
+        self.is_valid_instance_assuming_json_with_context(instance, context)
+    }
+
     /// Validate a borrowed representation that the caller has already proven
     /// belongs to the JSON data model.
     ///
