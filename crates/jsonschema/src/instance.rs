@@ -155,6 +155,14 @@ pub enum ProjectedPythonKind<'a> {
 /// beyond the root [`InstanceRef`] lifetime.
 #[cfg(feature = "python")]
 pub trait PythonInstanceProvider {
+    /// Return whether this provider can issue any prevalidated schema proofs.
+    ///
+    /// The default keeps the `$ref` hot path free of proof callbacks for
+    /// providers that never use [`PythonInstanceProvider::prevalidated_schema`].
+    fn has_prevalidated_schemas(&self) -> bool {
+        false
+    }
+
     /// Return the exact schema this projected value has already satisfied.
     ///
     /// The validator may use this proof to skip an identical `$ref` target.
@@ -221,6 +229,7 @@ pub trait PythonInstanceProvider {
 pub struct ProjectedPythonInstance<'a> {
     provider: &'a dyn PythonInstanceProvider,
     value: ProjectedPythonValue<'a>,
+    has_prevalidated_schemas: bool,
 }
 
 #[cfg(feature = "python")]
@@ -277,6 +286,7 @@ impl<'a> InstanceRef<'a> {
         Self {
             repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
                 provider,
+                has_prevalidated_schemas: provider.has_prevalidated_schemas(),
                 value: ProjectedPythonValue {
                     value: PythonValue::from_bound(value),
                     node,
@@ -310,7 +320,10 @@ impl<'a> InstanceRef<'a> {
     #[cfg(feature = "python")]
     pub(crate) fn prevalidated_schema(self) -> Option<&'a Value> {
         match self.repr {
-            InstanceRepr::ProjectedPython(value) => value.provider.prevalidated_schema(value.value),
+            InstanceRepr::ProjectedPython(value) if value.has_prevalidated_schemas => {
+                value.provider.prevalidated_schema(value.value)
+            }
+            InstanceRepr::ProjectedPython(_) => None,
             InstanceRepr::Serde(_) | InstanceRepr::Python(_) => None,
             #[cfg(feature = "jiter")]
             InstanceRepr::Jiter(_) => None,
@@ -511,6 +524,7 @@ impl<'a> InstanceRef<'a> {
                     ProjectedPythonKind::Array(value) => {
                         Some(ArrayRef::Projected(ProjectedPythonInstance {
                             provider: instance.provider,
+                            has_prevalidated_schemas: instance.has_prevalidated_schemas,
                             value,
                         }))
                     }
@@ -552,6 +566,7 @@ impl<'a> InstanceRef<'a> {
                     ProjectedPythonKind::Object(value) => {
                         Some(ObjectRef::Projected(ProjectedPythonInstance {
                             provider: instance.provider,
+                            has_prevalidated_schemas: instance.has_prevalidated_schemas,
                             value,
                         }))
                     }
@@ -915,6 +930,7 @@ impl<'a> ArrayRef<'a> {
                     .map(|child| InstanceRef {
                         repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
                             provider: value.provider,
+                            has_prevalidated_schemas: value.has_prevalidated_schemas,
                             value: child,
                         }),
                     })
@@ -1025,6 +1041,7 @@ impl<'a> Iterator for ArrayIter<'a> {
                 Some(InstanceRef {
                     repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
                         provider: value.provider,
+                        has_prevalidated_schemas: value.has_prevalidated_schemas,
                         value: child,
                     }),
                 })
@@ -1116,6 +1133,7 @@ impl<'a> ObjectRef<'a> {
                     .map(|child| InstanceRef {
                         repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
                             provider: value.provider,
+                            has_prevalidated_schemas: value.has_prevalidated_schemas,
                             value: child,
                         }),
                     })
@@ -1244,6 +1262,7 @@ impl<'a> Iterator for ObjectIter<'a> {
                     InstanceRef {
                         repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
                             provider: value.provider,
+                            has_prevalidated_schemas: value.has_prevalidated_schemas,
                             value: child,
                         }),
                     },
@@ -1597,6 +1616,10 @@ mod tests {
 
     #[cfg(feature = "python")]
     impl PythonInstanceProvider for PrevalidatedTupleProjection {
+        fn has_prevalidated_schemas(&self) -> bool {
+            true
+        }
+
         fn prevalidated_schema<'a>(&'a self, value: ProjectedPythonValue<'a>) -> Option<&'a Value> {
             (value.node() == 0).then_some(&self.schema)
         }
