@@ -4,7 +4,7 @@
 use crate::{
     error::{error, no_error, ErrorIterator},
     evaluation::{Annotations, ErrorDescription, Evaluation, EvaluationNode},
-    instance::InstanceRef,
+    instance::{InstanceIdentity, InstanceRef},
     node::SchemaNode,
     paths::{LazyLocation, Location, RefTracker},
     Draft, ValidationError, ValidationOptions,
@@ -18,9 +18,9 @@ pub(crate) use crate::paths::LazyEvaluationPath;
 /// Validation state for cycle detection and memoization.
 #[derive(Default)]
 pub struct ValidationContext {
-    validating: Vec<(usize, usize)>,
+    validating: Vec<(usize, InstanceIdentity)>,
     /// Lazy-initialized cache for recursive schema validation.
-    is_valid_cache: Option<AHashMap<(usize, usize), bool>>,
+    is_valid_cache: Option<AHashMap<(usize, InstanceIdentity), bool>>,
     /// Lazy-initialized cache for ECMA regex transformation results during format "regex" validation.
     ecma_regex_cache: Option<AHashMap<String, bool>>,
 }
@@ -421,6 +421,17 @@ impl Validator {
         if !instance.is_json() {
             return false;
         }
+        self.is_valid_instance_assuming_json(instance)
+    }
+
+    /// Validate a borrowed representation that the caller has already proven
+    /// belongs to the JSON data model.
+    ///
+    /// Prefer [`Validator::is_valid_instance`] unless another operation in the
+    /// same pipeline necessarily performs the complete JSON-shape check.
+    #[must_use]
+    #[inline]
+    pub fn is_valid_instance_assuming_json(&self, instance: InstanceRef<'_>) -> bool {
         let mut ctx = ValidationContext::new();
         self.root.is_valid_instance(instance, &mut ctx)
     }

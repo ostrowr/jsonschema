@@ -886,6 +886,8 @@ pub use evaluation::{
 };
 pub use http::HttpOptions;
 pub use instance::{ArrayRef, InstanceRef, NumberRef, ObjectRef};
+#[cfg(feature = "python")]
+pub use instance::{ProjectedPythonKind, ProjectedPythonValue, PythonInstanceProvider};
 pub use keywords::custom::Keyword;
 pub use options::{EmailOptions, FancyRegex, PatternOptions, Regex, ValidationOptions};
 pub use referencing::{

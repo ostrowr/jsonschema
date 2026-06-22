@@ -9,11 +9,18 @@ use crate::{
     validator::{EvaluationResult, Validate, ValidationContext},
     InstanceRef,
 };
+use ahash::AHashMap;
 use serde_json::{Map, Value};
 
 pub(crate) struct OneOfValidator {
     schemas: Vec<SchemaNode>,
     location: Location,
+    discriminator: Option<OneOfDiscriminator>,
+}
+
+struct OneOfDiscriminator {
+    property: String,
+    branches: AHashMap<String, usize>,
 }
 
 impl OneOfValidator {
@@ -21,6 +28,7 @@ impl OneOfValidator {
     pub(crate) fn compile<'a>(ctx: &compiler::Context, schema: &'a Value) -> CompilationResult<'a> {
         if let Value::Array(items) = schema {
             let ctx = ctx.new_at_location("oneOf");
+            let discriminator = compile_discriminator(&ctx, items);
             let mut schemas = Vec::with_capacity(items.len());
             for (idx, item) in items.iter().enumerate() {
                 let ctx = ctx.new_at_location(idx);
@@ -30,6 +38,7 @@ impl OneOfValidator {
             Ok(Box::new(OneOfValidator {
                 schemas,
                 location: ctx.location().clone(),
+                discriminator,
             }))
         } else {
             let location = ctx.location().join("oneOf");
@@ -84,6 +93,91 @@ impl OneOfValidator {
             .skip(index + 1)
             .any(|node| node.is_valid_instance(instance, ctx))
     }
+
+    fn discriminated_branch(&self, instance: InstanceRef<'_>) -> Option<usize> {
+        let discriminator = self.discriminator.as_ref()?;
+        let value = instance.as_object()?.get(&discriminator.property)?;
+        discriminator.branches.get(value.as_str()?).copied()
+    }
+}
+
+fn compile_discriminator(ctx: &compiler::Context, schemas: &[Value]) -> Option<OneOfDiscriminator> {
+    let first = discriminator_candidates(ctx, schemas.first()?)?;
+    for (property, _) in first {
+        let mut branches = AHashMap::with_capacity(schemas.len());
+        let mut complete = true;
+        for (index, schema) in schemas.iter().enumerate() {
+            let Some(value) = required_string_const(ctx, schema, &property) else {
+                complete = false;
+                break;
+            };
+            if branches.insert(value.clone(), index).is_some() {
+                complete = false;
+                break;
+            }
+        }
+        if complete {
+            return Some(OneOfDiscriminator { property, branches });
+        }
+    }
+    None
+}
+
+fn discriminator_candidates(
+    ctx: &compiler::Context,
+    schema: &Value,
+) -> Option<Vec<(String, String)>> {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let resolved = ctx.lookup(reference).ok()?;
+        return discriminator_candidates_from_schema(resolved.contents());
+    }
+    discriminator_candidates_from_schema(schema)
+}
+
+fn discriminator_candidates_from_schema(schema: &Value) -> Option<Vec<(String, String)>> {
+    let required = schema.get("required")?.as_array()?;
+    let properties = schema.get("properties")?.as_object()?;
+    Some(
+        required
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(|property| {
+                properties
+                    .get(property)?
+                    .get("const")?
+                    .as_str()
+                    .map(|value| (property.to_owned(), value.to_owned()))
+            })
+            .collect(),
+    )
+}
+
+fn required_string_const(
+    ctx: &compiler::Context,
+    schema: &Value,
+    property: &str,
+) -> Option<String> {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let resolved = ctx.lookup(reference).ok()?;
+        return required_string_const_from_schema(resolved.contents(), property);
+    }
+    required_string_const_from_schema(schema, property)
+}
+
+fn required_string_const_from_schema(schema: &Value, property: &str) -> Option<String> {
+    let required = schema.get("required")?.as_array()?;
+    if !required
+        .iter()
+        .any(|value| value.as_str() == Some(property))
+    {
+        return None;
+    }
+    schema
+        .get("properties")?
+        .get(property)?
+        .get("const")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Optimized validator for `oneOf` with a single subschema.
@@ -154,11 +248,17 @@ impl Validate for SingleOneOfValidator {
 
 impl Validate for OneOfValidator {
     fn is_valid(&self, instance: &Value, ctx: &mut ValidationContext) -> bool {
+        if let Some(index) = self.discriminated_branch(InstanceRef::from_serde(instance)) {
+            return self.schemas[index].is_valid(instance, ctx);
+        }
         let first_valid_idx = self.get_first_valid(instance, ctx);
         first_valid_idx.is_some_and(|idx| !self.are_others_valid(instance, idx, ctx))
     }
 
     fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
+        if let Some(index) = self.discriminated_branch(instance) {
+            return self.schemas[index].is_valid_instance(instance, ctx);
+        }
         self.get_first_valid_instance(instance, ctx)
             .is_some_and(|index| !self.are_other_instances_valid(instance, index, ctx))
     }
@@ -275,6 +375,99 @@ mod tests {
     use crate::tests_util;
     use serde_json::{json, Value};
     use test_case::test_case;
+
+    #[test]
+    fn required_unique_string_consts_preserve_one_of_semantics() {
+        let schema = json!({
+            "$defs": {
+                "cat": {
+                    "type": "object",
+                    "required": ["kind", "lives"],
+                    "properties": {
+                        "kind": {"const": "cat"},
+                        "lives": {"type": "integer", "minimum": 1}
+                    },
+                    "additionalProperties": false
+                },
+                "dog": {
+                    "type": "object",
+                    "required": ["kind", "good"],
+                    "properties": {
+                        "kind": {"const": "dog"},
+                        "good": {"type": "boolean"}
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "oneOf": [
+                {"$ref": "#/$defs/cat"},
+                {"$ref": "#/$defs/dog"}
+            ]
+        });
+        let validator = crate::validator_for(&schema).unwrap();
+
+        assert!(validator.is_valid(&json!({"kind": "cat", "lives": 9})));
+        assert!(validator.is_valid(&json!({"kind": "dog", "good": true})));
+        assert!(!validator.is_valid(&json!({"kind": "cat", "lives": 0})));
+        assert!(!validator.is_valid(&json!({"kind": "dog", "good": "yes"})));
+        assert!(!validator.is_valid(&json!({"kind": "bird"})));
+        assert!(!validator.is_valid(&json!({"lives": 9})));
+    }
+
+    #[test]
+    fn repeated_const_values_still_check_every_one_of_branch() {
+        let schema = json!({
+            "oneOf": [
+                {
+                    "required": ["kind"],
+                    "properties": {"kind": {"const": "same"}}
+                },
+                {
+                    "required": ["kind"],
+                    "properties": {"kind": {"const": "same"}}
+                }
+            ]
+        });
+        let validator = crate::validator_for(&schema).unwrap();
+        assert!(!validator.is_valid(&json!({"kind": "same"})));
+    }
+
+    #[cfg(feature = "jiter")]
+    #[test]
+    fn borrowed_jiter_instances_use_discriminated_one_of_semantics() {
+        let schema = json!({
+            "oneOf": [
+                {
+                    "required": ["kind", "value"],
+                    "properties": {
+                        "kind": {"const": "text"},
+                        "value": {"type": "string"}
+                    }
+                },
+                {
+                    "required": ["kind", "value"],
+                    "properties": {
+                        "kind": {"const": "number"},
+                        "value": {"type": "integer"}
+                    }
+                }
+            ]
+        });
+        let validator = crate::validator_for(&schema).unwrap();
+        for (source, expected) in [
+            (r#"{"kind":"text","value":"ok"}"#, true),
+            (r#"{"kind":"number","value":42}"#, true),
+            (r#"{"kind":"number","value":"bad"}"#, false),
+            (r#"{"kind":"unknown","value":42}"#, false),
+        ] {
+            let parsed = jiter::JsonValue::parse(source.as_bytes(), false).unwrap();
+            assert_eq!(
+                validator.is_valid_instance(crate::InstanceRef::from_jiter(&parsed)),
+                expected,
+                "{source}"
+            );
+        }
+    }
 
     #[test_case(&json!({"oneOf": [{"type": "string"}]}), &json!(0), "/oneOf")]
     #[test_case(&json!({"oneOf": [{"type": "string"}, {"maxLength": 3}]}), &json!(""), "/oneOf")]

@@ -33,6 +33,15 @@ enum InstanceRepr<'a> {
     Jiter(&'a jiter::JsonValue<'a>),
     #[cfg(feature = "python")]
     Python(PythonValue<'a>),
+    #[cfg(feature = "python")]
+    ProjectedPython(ProjectedPythonInstance<'a>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct InstanceIdentity {
+    representation: usize,
+    node: usize,
+    value: usize,
 }
 
 #[cfg(feature = "python")]
@@ -80,6 +89,139 @@ impl<'a> PythonValue<'a> {
     }
 }
 
+/// A Python value plus an application-defined projection node.
+///
+/// Projection providers use this compact value to expose non-JSON Python
+/// objects as their logical JSON representation without allocating an
+/// intermediate `serde_json::Value` tree.
+#[cfg(feature = "python")]
+#[derive(Clone, Copy, Debug)]
+pub struct ProjectedPythonValue<'a> {
+    value: PythonValue<'a>,
+    node: usize,
+}
+
+#[cfg(feature = "python")]
+impl<'a> ProjectedPythonValue<'a> {
+    /// Pair a borrowed Python value with a provider-defined projection node.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if `value` contains a null pointer, which would violate
+    /// `pyo3::Borrowed`'s validity invariant.
+    #[must_use]
+    pub fn new(node: usize, value: Borrowed<'a, 'a, PyAny>) -> Self {
+        Self {
+            value: PythonValue {
+                object: std::ptr::NonNull::new(value.as_ptr())
+                    .expect("Python objects are never represented by null pointers"),
+                py: value.py(),
+            },
+            node,
+        }
+    }
+
+    /// Return the provider-defined projection node.
+    #[must_use]
+    pub const fn node(self) -> usize {
+        self.node
+    }
+
+    /// Borrow the underlying Python object.
+    #[must_use]
+    pub fn value(self) -> Borrowed<'a, 'a, PyAny> {
+        self.value.borrowed()
+    }
+}
+
+/// The logical JSON shape selected by a [`PythonInstanceProvider`].
+#[cfg(feature = "python")]
+#[derive(Clone, Copy, Debug)]
+pub enum ProjectedPythonKind<'a> {
+    /// Interpret the underlying object as an ordinary Python JSON value.
+    Native(ProjectedPythonValue<'a>),
+    /// Interpret the value through the provider's array operations.
+    Array(ProjectedPythonValue<'a>),
+    /// Interpret the value through the provider's object operations.
+    Object(ProjectedPythonValue<'a>),
+    /// The value has no valid JSON representation under this projection.
+    Invalid,
+}
+
+/// Lazily projects application-defined Python objects into the JSON data model.
+///
+/// Implementations must return values borrowed from the root object graph or
+/// from the provider itself. The validator never retains a projected value
+/// beyond the root [`InstanceRef`] lifetime.
+#[cfg(feature = "python")]
+pub trait PythonInstanceProvider {
+    /// Resolve a value to its logical JSON shape.
+    fn project<'a>(&'a self, value: ProjectedPythonValue<'a>) -> ProjectedPythonKind<'a>;
+
+    /// Return an array's logical length.
+    fn array_len(&self, value: ProjectedPythonValue<'_>) -> usize;
+
+    /// Return an array element and its projection node.
+    fn array_get<'a>(
+        &'a self,
+        value: ProjectedPythonValue<'a>,
+        index: usize,
+    ) -> Option<ProjectedPythonValue<'a>>;
+
+    /// Return an object's logical property count.
+    fn object_len(&self, value: ProjectedPythonValue<'_>) -> usize;
+
+    /// Return whether every logical object key is a string.
+    ///
+    /// Providers synthesizing keys from static metadata may use the default.
+    fn object_keys_are_strings(&self, _value: ProjectedPythonValue<'_>) -> bool {
+        true
+    }
+
+    /// Look up one logical object property.
+    fn object_get<'a>(
+        &'a self,
+        value: ProjectedPythonValue<'a>,
+        key: &str,
+    ) -> Option<ProjectedPythonValue<'a>> {
+        let mut state = [0, 0];
+        while let Some((candidate, child)) = self.object_next(value, &mut state) {
+            if candidate == key {
+                return Some(child);
+            }
+        }
+        None
+    }
+
+    /// Advance an object iterator.
+    ///
+    /// Both state words are initialized to zero and are exclusively owned by
+    /// the iterator, so providers may interpret them however they choose.
+    fn object_next<'a>(
+        &'a self,
+        value: ProjectedPythonValue<'a>,
+        state: &mut [usize; 2],
+    ) -> Option<(&'a str, ProjectedPythonValue<'a>)>;
+}
+
+#[cfg(feature = "python")]
+#[derive(Clone, Copy)]
+#[doc(hidden)]
+pub struct ProjectedPythonInstance<'a> {
+    provider: &'a dyn PythonInstanceProvider,
+    value: ProjectedPythonValue<'a>,
+}
+
+#[cfg(feature = "python")]
+impl std::fmt::Debug for ProjectedPythonInstance<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProjectedPythonInstance")
+            .field("value", &self.value)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<'a> InstanceRef<'a> {
     /// Borrow a `serde_json` value.
     #[must_use]
@@ -110,6 +252,28 @@ impl<'a> InstanceRef<'a> {
         }
     }
 
+    /// Borrow a Python object through an application-defined JSON projection.
+    #[cfg(feature = "python")]
+    #[must_use]
+    pub fn from_projected_python<'py>(
+        value: &'a Bound<'py, PyAny>,
+        node: usize,
+        provider: &'a dyn PythonInstanceProvider,
+    ) -> Self
+    where
+        'py: 'a,
+    {
+        Self {
+            repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
+                provider,
+                value: ProjectedPythonValue {
+                    value: PythonValue::from_bound(value),
+                    node,
+                },
+            }),
+        }
+    }
+
     #[cfg(feature = "python")]
     fn from_python_value(value: PythonValue<'a>) -> Self {
         Self {
@@ -126,6 +290,8 @@ impl<'a> InstanceRef<'a> {
             InstanceRepr::Jiter(_) => None,
             #[cfg(feature = "python")]
             InstanceRepr::Python(_) => None,
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(_) => None,
         }
     }
 
@@ -137,6 +303,13 @@ impl<'a> InstanceRef<'a> {
             InstanceRepr::Jiter(value) => matches!(value, jiter::JsonValue::Null),
             #[cfg(feature = "python")]
             InstanceRepr::Python(value) => value.borrowed().is_none(),
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(value) => match value.provider.project(value.value) {
+                ProjectedPythonKind::Native(value) => value.value.borrowed().is_none(),
+                ProjectedPythonKind::Array(_)
+                | ProjectedPythonKind::Object(_)
+                | ProjectedPythonKind::Invalid => false,
+            },
         }
     }
 
@@ -160,6 +333,18 @@ impl<'a> InstanceRef<'a> {
                 .cast::<PyBool>()
                 .ok()
                 .map(|value| value.is_true()),
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(value) => match value.provider.project(value.value) {
+                ProjectedPythonKind::Native(value) => value
+                    .value
+                    .borrowed()
+                    .cast::<PyBool>()
+                    .ok()
+                    .map(|value| value.is_true()),
+                ProjectedPythonKind::Array(_)
+                | ProjectedPythonKind::Object(_)
+                | ProjectedPythonKind::Invalid => None,
+            },
         }
     }
 
@@ -179,6 +364,13 @@ impl<'a> InstanceRef<'a> {
             },
             #[cfg(feature = "python")]
             InstanceRepr::Python(value) => python_string(value),
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(value) => match value.provider.project(value.value) {
+                ProjectedPythonKind::Native(value) => python_string(value.value),
+                ProjectedPythonKind::Array(_)
+                | ProjectedPythonKind::Object(_)
+                | ProjectedPythonKind::Invalid => None,
+            },
         }
     }
 
@@ -216,6 +408,26 @@ impl<'a> InstanceRef<'a> {
                         .map(NumberRef::Float)
                 }
             }
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(value) => match value.provider.project(value.value) {
+                ProjectedPythonKind::Native(value) => {
+                    let borrowed = value.value.borrowed();
+                    if borrowed.cast::<PyBool>().is_ok() {
+                        None
+                    } else if borrowed.cast::<PyInt>().is_ok() {
+                        Some(NumberRef::PythonInteger(value.value))
+                    } else {
+                        borrowed
+                            .cast::<PyFloat>()
+                            .ok()
+                            .and_then(|value| value.value().is_finite().then(|| value.value()))
+                            .map(NumberRef::Float)
+                    }
+                }
+                ProjectedPythonKind::Array(_)
+                | ProjectedPythonKind::Object(_)
+                | ProjectedPythonKind::Invalid => None,
+            },
         }
     }
 
@@ -268,6 +480,21 @@ impl<'a> InstanceRef<'a> {
                     None
                 }
             }
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(instance) => {
+                match instance.provider.project(instance.value) {
+                    ProjectedPythonKind::Native(value) => {
+                        InstanceRef::from_python_value(value.value).as_array()
+                    }
+                    ProjectedPythonKind::Array(value) => {
+                        Some(ArrayRef::Projected(ProjectedPythonInstance {
+                            provider: instance.provider,
+                            value,
+                        }))
+                    }
+                    ProjectedPythonKind::Object(_) | ProjectedPythonKind::Invalid => None,
+                }
+            }
         }
     }
 
@@ -294,18 +521,52 @@ impl<'a> InstanceRef<'a> {
                 .cast::<PyDict>()
                 .is_ok()
                 .then_some(ObjectRef::Python(value)),
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(instance) => {
+                match instance.provider.project(instance.value) {
+                    ProjectedPythonKind::Native(value) => {
+                        InstanceRef::from_python_value(value.value).as_object()
+                    }
+                    ProjectedPythonKind::Object(value) => {
+                        Some(ObjectRef::Projected(ProjectedPythonInstance {
+                            provider: instance.provider,
+                            value,
+                        }))
+                    }
+                    ProjectedPythonKind::Array(_) | ProjectedPythonKind::Invalid => None,
+                }
+            }
         }
     }
 
     /// Stable identity of this node for recursive-schema cycle detection.
     #[must_use]
-    pub(crate) fn identity(self) -> usize {
+    pub(crate) fn identity(self) -> InstanceIdentity {
         match self.repr {
-            InstanceRepr::Serde(value) => std::ptr::from_ref(value).cast::<()>() as usize,
+            InstanceRepr::Serde(value) => InstanceIdentity {
+                representation: 0,
+                node: 0,
+                value: std::ptr::from_ref(value).cast::<()>() as usize,
+            },
             #[cfg(feature = "jiter")]
-            InstanceRepr::Jiter(value) => std::ptr::from_ref(value).cast::<()>() as usize,
+            InstanceRepr::Jiter(value) => InstanceIdentity {
+                representation: 1,
+                node: 0,
+                value: std::ptr::from_ref(value).cast::<()>() as usize,
+            },
             #[cfg(feature = "python")]
-            InstanceRepr::Python(value) => value.object.as_ptr().cast::<()>() as usize,
+            InstanceRepr::Python(value) => InstanceIdentity {
+                representation: 2,
+                node: 0,
+                value: value.object.as_ptr().cast::<()>() as usize,
+            },
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(value) => InstanceIdentity {
+                representation: std::ptr::from_ref::<dyn PythonInstanceProvider>(value.provider)
+                    .cast::<()>() as usize,
+                node: value.value.node,
+                value: value.value.value.object.as_ptr().cast::<()>() as usize,
+            },
         }
     }
 
@@ -318,6 +579,8 @@ impl<'a> InstanceRef<'a> {
             InstanceRepr::Jiter(value) => jiter_to_serde(value),
             #[cfg(feature = "python")]
             InstanceRepr::Python(value) => python_to_serde(value),
+            #[cfg(feature = "python")]
+            InstanceRepr::ProjectedPython(_) => borrowed_instance_to_serde(self),
         }
     }
 
@@ -329,7 +592,10 @@ impl<'a> InstanceRef<'a> {
     #[must_use]
     pub fn is_json(self) -> bool {
         #[cfg(feature = "python")]
-        if matches!(self.repr, InstanceRepr::Python(_)) {
+        if matches!(
+            self.repr,
+            InstanceRepr::Python(_) | InstanceRepr::ProjectedPython(_)
+        ) {
             return python_value_is_json(self, &mut std::collections::HashSet::new());
         }
         true
@@ -546,6 +812,8 @@ pub enum ArrayRef<'a> {
     PythonList(PythonValue<'a>),
     #[cfg(feature = "python")]
     PythonTuple(PythonValue<'a>),
+    #[cfg(feature = "python")]
+    Projected(ProjectedPythonInstance<'a>),
 }
 
 impl<'a> ArrayRef<'a> {
@@ -573,6 +841,8 @@ impl<'a> ArrayRef<'a> {
                 usize::try_from(unsafe { ffi::PyTuple_Size(value.object.as_ptr()) })
                     .expect("Python tuple lengths are non-negative")
             }
+            #[cfg(feature = "python")]
+            Self::Projected(value) => value.provider.array_len(value.value),
         }
     }
 
@@ -615,6 +885,18 @@ impl<'a> ArrayRef<'a> {
                     PythonValue::from_ptr(value.py, item)
                 }))
             }
+            #[cfg(feature = "python")]
+            Self::Projected(value) => {
+                value
+                    .provider
+                    .array_get(value.value, index)
+                    .map(|child| InstanceRef {
+                        repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
+                            provider: value.provider,
+                            value: child,
+                        }),
+                    })
+            }
         }
     }
 
@@ -637,6 +919,12 @@ impl<'a> ArrayRef<'a> {
                 index: 0,
                 len: self.len(),
                 tuple: true,
+            },
+            #[cfg(feature = "python")]
+            Self::Projected(value) => ArrayIter::Projected {
+                value,
+                index: 0,
+                len: self.len(),
             },
         }
     }
@@ -661,6 +949,12 @@ pub enum ArrayIter<'a> {
         index: usize,
         len: usize,
         tuple: bool,
+    },
+    #[cfg(feature = "python")]
+    Projected {
+        value: ProjectedPythonInstance<'a>,
+        index: usize,
+        len: usize,
     },
 }
 
@@ -699,6 +993,20 @@ impl<'a> Iterator for ArrayIter<'a> {
                     PythonValue::from_ptr(value.py, item)
                 }))
             }
+            #[cfg(feature = "python")]
+            Self::Projected { value, index, len } => {
+                if *index >= *len {
+                    return None;
+                }
+                let child = value.provider.array_get(value.value, *index)?;
+                *index += 1;
+                Some(InstanceRef {
+                    repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
+                        provider: value.provider,
+                        value: child,
+                    }),
+                })
+            }
         }
     }
 
@@ -709,6 +1017,11 @@ impl<'a> Iterator for ArrayIter<'a> {
             Self::Jiter(items) => items.size_hint(),
             #[cfg(feature = "python")]
             Self::Python { index, len, .. } => {
+                let remaining = len.saturating_sub(*index);
+                (remaining, Some(remaining))
+            }
+            #[cfg(feature = "python")]
+            Self::Projected { index, len, .. } => {
                 let remaining = len.saturating_sub(*index);
                 (remaining, Some(remaining))
             }
@@ -727,6 +1040,8 @@ pub enum ObjectRef<'a> {
     Jiter(&'a [(std::borrow::Cow<'a, str>, jiter::JsonValue<'a>)]),
     #[cfg(feature = "python")]
     Python(PythonValue<'a>),
+    #[cfg(feature = "python")]
+    Projected(ProjectedPythonInstance<'a>),
 }
 
 impl<'a> ObjectRef<'a> {
@@ -748,6 +1063,8 @@ impl<'a> ObjectRef<'a> {
                 usize::try_from(unsafe { ffi::PyDict_Size(value.object.as_ptr()) })
                     .expect("Python dict lengths are non-negative")
             }
+            #[cfg(feature = "python")]
+            Self::Projected(value) => value.provider.object_len(value.value),
         }
     }
 
@@ -769,6 +1086,18 @@ impl<'a> ObjectRef<'a> {
             Self::Python(_) => self
                 .iter()
                 .find_map(|(candidate, value)| (candidate == key).then_some(value)),
+            #[cfg(feature = "python")]
+            Self::Projected(value) => {
+                value
+                    .provider
+                    .object_get(value.value, key)
+                    .map(|child| InstanceRef {
+                        repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
+                            provider: value.provider,
+                            value: child,
+                        }),
+                    })
+            }
         }
     }
 
@@ -787,6 +1116,12 @@ impl<'a> ObjectRef<'a> {
             Self::Python(value) => ObjectIter::Python {
                 value,
                 position: 0,
+                remaining: self.len(),
+            },
+            #[cfg(feature = "python")]
+            Self::Projected(value) => ObjectIter::Projected {
+                value,
+                state: [0, 0],
                 remaining: self.len(),
             },
         }
@@ -820,6 +1155,12 @@ pub enum ObjectIter<'a> {
     Python {
         value: PythonValue<'a>,
         position: ffi::Py_ssize_t,
+        remaining: usize,
+    },
+    #[cfg(feature = "python")]
+    Projected {
+        value: ProjectedPythonInstance<'a>,
+        state: [usize; 2],
         remaining: usize,
     },
 }
@@ -868,6 +1209,24 @@ impl<'a> Iterator for ObjectIter<'a> {
                     InstanceRef::from_python_value(child),
                 ))
             }
+            #[cfg(feature = "python")]
+            Self::Projected {
+                value,
+                state,
+                remaining,
+            } => {
+                let (key, child) = value.provider.object_next(value.value, state)?;
+                *remaining = remaining.saturating_sub(1);
+                Some((
+                    key,
+                    InstanceRef {
+                        repr: InstanceRepr::ProjectedPython(ProjectedPythonInstance {
+                            provider: value.provider,
+                            value: child,
+                        }),
+                    },
+                ))
+            }
         }
     }
 
@@ -878,6 +1237,8 @@ impl<'a> Iterator for ObjectIter<'a> {
             Self::Jiter(properties) => properties.size_hint(),
             #[cfg(feature = "python")]
             Self::Python { remaining, .. } => (*remaining, Some(*remaining)),
+            #[cfg(feature = "python")]
+            Self::Projected { remaining, .. } => (*remaining, Some(*remaining)),
         }
     }
 }
@@ -922,7 +1283,7 @@ impl FusedIterator for ObjectValues<'_> {}
 #[cfg(feature = "python")]
 fn python_value_is_json(
     instance: InstanceRef<'_>,
-    active_containers: &mut std::collections::HashSet<usize>,
+    active_containers: &mut std::collections::HashSet<InstanceIdentity>,
 ) -> bool {
     if instance.is_null() || instance.is_boolean() || instance.is_string() || instance.is_number() {
         return true;
@@ -938,46 +1299,68 @@ fn python_value_is_json(
         active_containers.remove(&identity);
         return valid;
     }
-    let InstanceRepr::Python(value) = instance.repr else {
-        return false;
-    };
-    if value.borrowed().cast::<PyDict>().is_err() {
-        return false;
-    }
     let identity = instance.identity();
     if !active_containers.insert(identity) {
         return false;
     }
-    let mut position = 0;
-    let mut key = std::ptr::null_mut();
-    let mut child = std::ptr::null_mut();
-    loop {
-        // SAFETY: `value` is a dict and PyDict_Next initializes borrowed
-        // pointers whenever it returns non-zero.
-        let present = unsafe {
-            ffi::PyDict_Next(
-                value.object.as_ptr(),
-                &raw mut position,
-                &raw mut key,
-                &raw mut child,
-            )
-        };
-        if present == 0 {
-            break;
+    match instance.repr {
+        InstanceRepr::Python(value) => {
+            if value.borrowed().cast::<PyDict>().is_err() {
+                active_containers.remove(&identity);
+                return false;
+            }
+            let mut position = 0;
+            let mut key = std::ptr::null_mut();
+            let mut child = std::ptr::null_mut();
+            loop {
+                // SAFETY: `value` is a dict and PyDict_Next initializes borrowed
+                // pointers whenever it returns non-zero.
+                let present = unsafe {
+                    ffi::PyDict_Next(
+                        value.object.as_ptr(),
+                        &raw mut position,
+                        &raw mut key,
+                        &raw mut child,
+                    )
+                };
+                if present == 0 {
+                    break;
+                }
+                // SAFETY: successful PyDict_Next returns non-null values owned by the dict.
+                let key = unsafe { PythonValue::from_ptr(value.py, key) };
+                if key.borrowed().cast::<PyString>().is_err() {
+                    active_containers.remove(&identity);
+                    return false;
+                }
+                // SAFETY: successful PyDict_Next returns a non-null value owned by the dict.
+                let child = InstanceRef::from_python_value(unsafe {
+                    PythonValue::from_ptr(value.py, child)
+                });
+                if !python_value_is_json(child, active_containers) {
+                    active_containers.remove(&identity);
+                    return false;
+                }
+            }
         }
-        // SAFETY: successful PyDict_Next returns non-null values owned by the dict.
-        let key = unsafe { PythonValue::from_ptr(value.py, key) };
-        if key.borrowed().cast::<PyString>().is_err() {
-            active_containers.remove(&identity);
-            return false;
+        InstanceRepr::ProjectedPython(_) => {
+            let Some(properties) = instance.as_object() else {
+                active_containers.remove(&identity);
+                return false;
+            };
+            if let ObjectRef::Projected(value) = properties {
+                if !value.provider.object_keys_are_strings(value.value) {
+                    active_containers.remove(&identity);
+                    return false;
+                }
+            }
+            for (_, child) in properties {
+                if !python_value_is_json(child, active_containers) {
+                    active_containers.remove(&identity);
+                    return false;
+                }
+            }
         }
-        // SAFETY: successful PyDict_Next returns a non-null value owned by the dict.
-        let child =
-            InstanceRef::from_python_value(unsafe { PythonValue::from_ptr(value.py, child) });
-        if !python_value_is_json(child, active_containers) {
-            active_containers.remove(&identity);
-            return false;
-        }
+        _ => unreachable!("only Python representations require recursive JSON checks"),
     }
     active_containers.remove(&identity);
     true
@@ -1008,6 +1391,11 @@ fn python_integer_to_bigint(value: PythonValue<'_>) -> Option<num_bigint::BigInt
 #[cfg(feature = "python")]
 fn python_to_serde(value: PythonValue<'_>) -> Value {
     let instance = InstanceRef::from_python_value(value);
+    borrowed_instance_to_serde(instance)
+}
+
+#[cfg(feature = "python")]
+fn borrowed_instance_to_serde(instance: InstanceRef<'_>) -> Value {
     if instance.is_null() {
         Value::Null
     } else if let Some(value) = instance.as_bool() {
@@ -1035,7 +1423,11 @@ fn python_to_serde(value: PythonValue<'_>) -> Value {
                 }
             }
             NumberRef::Float(value) => Number::from_f64(value).map_or(Value::Null, Value::Number),
-            _ => unreachable!("Python values produce only PythonInteger or Float number views"),
+            NumberRef::Serde(value) => Value::Number(value.clone()),
+            NumberRef::Integer(value) => Value::Number(Number::from(value)),
+            #[cfg(feature = "jiter")]
+            NumberRef::BigInteger(value) => serde_json::from_str(&value.to_string())
+                .expect("borrowed big integers are syntactically valid JSON numbers"),
         }
     } else if let Some(items) = instance.as_array() {
         Value::Array(items.iter().map(InstanceRef::to_owned).collect())
@@ -1076,12 +1468,100 @@ fn jiter_to_serde(value: &jiter::JsonValue<'_>) -> Value {
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "python")]
-    use pyo3::types::PyAnyMethods;
+    use pyo3::{
+        ffi,
+        prelude::*,
+        types::{PyAnyMethods, PyList, PyString, PyTuple},
+        Borrowed,
+    };
     use serde_json::json;
     #[cfg(any(feature = "jiter", feature = "python"))]
     use serde_json::Value;
 
     use super::InstanceRef;
+    #[cfg(feature = "python")]
+    use super::{ProjectedPythonKind, ProjectedPythonValue, PythonInstanceProvider};
+
+    #[cfg(feature = "python")]
+    struct TupleProjection {
+        string_keys: bool,
+    }
+
+    #[cfg(feature = "python")]
+    impl TupleProjection {
+        fn child(
+            parent: ProjectedPythonValue<'_>,
+            node: usize,
+            child: *mut ffi::PyObject,
+        ) -> Option<ProjectedPythonValue<'_>> {
+            let parent = parent.value();
+            // SAFETY: callers obtain `child` from a tuple or list owned by
+            // `parent`, which remains alive for the projected instance.
+            let child = unsafe { Borrowed::from_ptr_or_opt(parent.py(), child) }?;
+            Some(ProjectedPythonValue::new(node, child))
+        }
+    }
+
+    #[cfg(feature = "python")]
+    impl PythonInstanceProvider for TupleProjection {
+        fn project<'a>(&'a self, value: ProjectedPythonValue<'a>) -> ProjectedPythonKind<'a> {
+            match value.node() {
+                0 => ProjectedPythonKind::Object(value),
+                2 => ProjectedPythonKind::Array(value),
+                1 | 3 => ProjectedPythonKind::Native(value),
+                _ => ProjectedPythonKind::Invalid,
+            }
+        }
+
+        fn array_len(&self, value: ProjectedPythonValue<'_>) -> usize {
+            value
+                .value()
+                .cast::<PyList>()
+                .map_or(0, |items| items.len())
+        }
+
+        fn array_get<'a>(
+            &'a self,
+            value: ProjectedPythonValue<'a>,
+            index: usize,
+        ) -> Option<ProjectedPythonValue<'a>> {
+            let items = value.value().cast::<PyList>().ok()?;
+            let index = ffi::Py_ssize_t::try_from(index).ok()?;
+            // SAFETY: the bounds check precedes this borrowed lookup.
+            if index >= unsafe { ffi::PyList_Size(items.as_ptr()) } {
+                return None;
+            }
+            Self::child(value, 3, unsafe {
+                ffi::PyList_GetItem(items.as_ptr(), index)
+            })
+        }
+
+        fn object_len(&self, value: ProjectedPythonValue<'_>) -> usize {
+            usize::from(value.node() == 0) * 2
+        }
+
+        fn object_keys_are_strings(&self, _value: ProjectedPythonValue<'_>) -> bool {
+            self.string_keys
+        }
+
+        fn object_next<'a>(
+            &'a self,
+            value: ProjectedPythonValue<'a>,
+            state: &mut [usize; 2],
+        ) -> Option<(&'a str, ProjectedPythonValue<'a>)> {
+            let (key, index, node) = match state[0] {
+                0 => ("name", 0, 1),
+                1 => ("values", 1, 2),
+                _ => return None,
+            };
+            state[0] += 1;
+            let tuple = value.value().cast::<PyTuple>().ok()?;
+            Self::child(value, node, unsafe {
+                ffi::PyTuple_GetItem(tuple.as_ptr(), index)
+            })
+            .map(|child| (key, child))
+        }
+    }
 
     #[test]
     fn serde_view_preserves_json_semantic_equality() {
@@ -1231,6 +1711,52 @@ mod tests {
                     "{schema_source}"
                 );
             }
+        });
+    }
+
+    #[cfg(feature = "python")]
+    #[test]
+    fn projected_python_values_validate_nested_json_without_materializing_it() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let schema = json!({
+                "type": "object",
+                "required": ["name", "values"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1},
+                    "values": {
+                        "type": "array",
+                        "minItems": 2,
+                        "items": {"type": "integer", "minimum": 0}
+                    }
+                },
+                "additionalProperties": false
+            });
+            let validator = crate::draft202012::options().build(&schema).unwrap();
+            let provider = TupleProjection { string_keys: true };
+
+            let valid_name = PyString::new(py, "Ada").into_any();
+            let valid_values = PyList::new(py, [1, 2]).unwrap().into_any();
+            let valid = PyTuple::new(py, [valid_name, valid_values]).unwrap();
+            let projected = InstanceRef::from_projected_python(&valid, 0, &provider);
+            assert!(validator.is_valid_instance(projected));
+            assert_eq!(
+                projected.to_owned(),
+                json!({"name": "Ada", "values": [1, 2]})
+            );
+
+            let invalid_name = PyString::new(py, "").into_any();
+            let invalid_values = PyList::new(py, [1, -1]).unwrap().into_any();
+            let invalid = PyTuple::new(py, [invalid_name, invalid_values]).unwrap();
+            assert!(!validator
+                .is_valid_instance(InstanceRef::from_projected_python(&invalid, 0, &provider,)));
+
+            let non_string_keys = TupleProjection { string_keys: false };
+            assert!(!InstanceRef::from_projected_python(&valid, 0, &non_string_keys).is_json());
+
+            let cycle = PyList::empty(py);
+            cycle.append(&cycle).unwrap();
+            assert!(!InstanceRef::from_projected_python(&cycle, 2, &provider).is_json());
         });
     }
 
