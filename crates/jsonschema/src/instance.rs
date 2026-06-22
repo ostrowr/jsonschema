@@ -1075,7 +1075,11 @@ fn jiter_to_serde(value: &jiter::JsonValue<'_>) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{json, Value};
+    #[cfg(feature = "python")]
+    use pyo3::types::PyAnyMethods;
+    use serde_json::json;
+    #[cfg(any(feature = "jiter", feature = "python"))]
+    use serde_json::Value;
 
     use super::InstanceRef;
 
@@ -1144,6 +1148,90 @@ mod tests {
                 "representations disagreed for {source}"
             );
         }
+    }
+
+    #[cfg(feature = "jiter")]
+    #[test]
+    fn jiter_numeric_validation_matches_serde_at_large_fractional_boundary() {
+        for (schema_source, instance_source, expected) in [
+            (
+                r#"{"minimum":9.727837981879871e+26}"#,
+                r"9.727837981879871e+26",
+                true,
+            ),
+            (
+                r#"{"maximum":9.727837981879871e+26}"#,
+                r"9.727837981879871e+26",
+                true,
+            ),
+            (
+                r#"{"exclusiveMinimum":9.727837981879871e+26}"#,
+                r"9.727837981879871e+26",
+                false,
+            ),
+            (
+                r#"{"exclusiveMaximum":9.727837981879871e+26}"#,
+                r"9.727837981879871e+26",
+                false,
+            ),
+            (r#"{"multipleOf":0.1}"#, "0.3", true),
+        ] {
+            let schema: Value = serde_json::from_str(schema_source).unwrap();
+            let serde: Value = serde_json::from_str(instance_source).unwrap();
+            let jiter = jiter::JsonValue::parse(instance_source.as_bytes(), false).unwrap();
+            let validator = crate::draft202012::options().build(&schema).unwrap();
+
+            assert_eq!(validator.is_valid(&serde), expected, "{schema_source}");
+            assert_eq!(
+                validator.is_valid(&serde),
+                validator.is_valid_instance(InstanceRef::from_jiter(&jiter)),
+                "{schema_source}"
+            );
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[test]
+    fn python_numeric_validation_matches_serde_at_large_fractional_boundary() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let json = py.import("json").unwrap();
+            for (schema_source, instance_source, expected) in [
+                (
+                    r#"{"minimum":9.727837981879871e+26}"#,
+                    r"9.727837981879871e+26",
+                    true,
+                ),
+                (
+                    r#"{"maximum":9.727837981879871e+26}"#,
+                    r"9.727837981879871e+26",
+                    true,
+                ),
+                (
+                    r#"{"exclusiveMinimum":9.727837981879871e+26}"#,
+                    r"9.727837981879871e+26",
+                    false,
+                ),
+                (
+                    r#"{"exclusiveMaximum":9.727837981879871e+26}"#,
+                    r"9.727837981879871e+26",
+                    false,
+                ),
+                (r#"{"multipleOf":0.1}"#, "0.3", true),
+            ] {
+                let schema: Value = serde_json::from_str(schema_source).unwrap();
+                let serde: Value = serde_json::from_str(instance_source).unwrap();
+                let python = json.call_method1("loads", (instance_source,)).unwrap();
+                let validator = crate::draft202012::options().build(&schema).unwrap();
+
+                assert_eq!(validator.is_valid(&serde), expected, "{schema_source}");
+                assert_eq!(
+                    validator.is_valid(&serde),
+                    validator.is_valid_instance(InstanceRef::from_python(&python)),
+                    "{schema_source}"
+                );
+            }
+        });
     }
 
     #[cfg(feature = "jiter")]

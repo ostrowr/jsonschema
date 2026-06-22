@@ -28,11 +28,13 @@ tls-ring = ["rustls/ring"]
 # Support for arbitrarily large integers and exact decimal values when parsing JSON from strings.
 arbitrary-precision = ["serde_json/arbitrary_precision", "dep:num-bigint"]
 # Validate borrowed values parsed by jiter without first materializing a
-# serde_json::Value tree.
-jiter = ["dep:jiter", "dep:num-bigint"]
+# serde_json::Value tree. Exact schema numbers are required because jiter and
+# serde_json can round the same decimal token to adjacent binary64 values.
+jiter = ["dep:jiter", "dep:num-bigint", "arbitrary-precision"]
 # Validate Python JSON values in place. This is kept optional so the core Rust
-# crate does not acquire a Python runtime dependency by default.
-python = ["dep:num-bigint", "dep:pyo3"]
+# crate does not acquire a Python runtime dependency by default. Python floats
+# likewise need exact decimal schema bounds for parity with serialized JSON.
+python = ["dep:num-bigint", "dep:pyo3", "arbitrary-precision"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Use rustls-no-provider to allow manual selection of crypto backend
