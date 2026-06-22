@@ -26,8 +26,20 @@ pub struct ValidationContext {
 }
 
 impl ValidationContext {
-    pub(crate) fn new() -> Self {
+    /// Create reusable state for repeated flag validation.
+    #[must_use]
+    pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Clear instance-specific state while retaining allocated capacity.
+    ///
+    /// A context must be reset before it is reused with another instance.
+    pub fn reset(&mut self) {
+        self.validating.clear();
+        if let Some(cache) = &mut self.is_valid_cache {
+            cache.clear();
+        }
     }
 
     /// Returns `true` if cycle detected.
@@ -435,6 +447,21 @@ impl Validator {
         let mut ctx = ValidationContext::new();
         self.root.is_valid_instance(instance, &mut ctx)
     }
+
+    /// Validate an already-proven JSON representation with reusable state.
+    ///
+    /// The context is reset before validation, so memoized instance identities
+    /// can never leak between object graphs while their allocations are reused.
+    #[must_use]
+    #[inline]
+    pub fn is_valid_instance_assuming_json_with_context(
+        &self,
+        instance: InstanceRef<'_>,
+        context: &mut ValidationContext,
+    ) -> bool {
+        context.reset();
+        self.root.is_valid_instance(instance, context)
+    }
     /// Evaluate the schema and expose structured output formats.
     #[must_use]
     #[inline]
@@ -454,7 +481,10 @@ impl Validator {
 
 #[cfg(test)]
 mod tests {
-    use crate::{error::ValidationError, keywords::custom::Keyword, paths::Location, Validator};
+    use crate::{
+        error::ValidationError, keywords::custom::Keyword, paths::Location, InstanceRef,
+        ValidationContext, Validator,
+    };
     use fancy_regex::Regex;
     use num_cmp::NumCmp;
     use serde_json::{json, Map, Value};
@@ -483,6 +513,53 @@ mod tests {
         assert_eq!(validator.root.validators().len(), 1);
         assert!(validator.validate(&value1).is_ok());
         assert!(validator.validate(&value2).is_err());
+    }
+
+    #[test]
+    fn reusable_context_clears_instance_memoization_and_retains_capacity() {
+        let schema = json!({
+            "$defs": {
+                "node": {
+                    "type": "object",
+                    "required": ["value", "next"],
+                    "properties": {
+                        "value": {"type": "integer"},
+                        "next": {
+                            "anyOf": [
+                                {"$ref": "#/$defs/node"},
+                                {"type": "null"}
+                            ]
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "$ref": "#/$defs/node"
+        });
+        let validator = crate::validator_for(&schema).unwrap();
+        let valid = json!({"value": 1, "next": {"value": 2, "next": null}});
+        let invalid = json!({"value": 1, "next": {"value": "wrong", "next": null}});
+        let mut context = ValidationContext::new();
+
+        assert!(validator.is_valid_instance_assuming_json_with_context(
+            InstanceRef::from_serde(&valid),
+            &mut context,
+        ));
+        let allocated_capacity = context
+            .is_valid_cache
+            .as_ref()
+            .map_or(0, |cache| cache.capacity());
+        assert!(allocated_capacity > 0);
+
+        assert!(!validator.is_valid_instance_assuming_json_with_context(
+            InstanceRef::from_serde(&invalid),
+            &mut context,
+        ));
+        context.reset();
+        assert!(context.validating.is_empty());
+        let cache = context.is_valid_cache.as_ref().unwrap();
+        assert!(cache.is_empty());
+        assert_eq!(cache.capacity(), allocated_capacity);
     }
 
     #[test]
