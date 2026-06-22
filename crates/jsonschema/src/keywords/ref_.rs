@@ -16,8 +16,6 @@ use std::sync::Arc;
 /// (either a `PendingSchemaNode` or a cached node returned by `lookup_maybe_recursive`).
 struct RefValidator {
     inner: Box<dyn Validate>,
-    #[cfg(feature = "python")]
-    prevalidated_schema: Option<Arc<Value>>,
     /// Path of this `$ref` keyword relative to its resource base.
     /// E.g., `/properties/foo/$ref` (not the full canonical path).
     /// Used for building the `tracker` prefix.
@@ -34,13 +32,6 @@ impl Validate for RefValidator {
     }
 
     fn is_valid_instance(&self, instance: InstanceRef<'_>, ctx: &mut ValidationContext) -> bool {
-        #[cfg(feature = "python")]
-        if instance
-            .prevalidated_schema()
-            .is_some_and(|schema| self.prevalidated_schema.as_deref() == Some(schema))
-        {
-            return true;
-        }
         self.inner.is_valid_instance(instance, ctx)
     }
 
@@ -202,8 +193,6 @@ fn compile_reference_validator<'a>(
         Ok(Some(validator)) => {
             return Some(Ok(Box::new(RefValidator {
                 inner: validator,
-                #[cfg(feature = "python")]
-                prevalidated_schema: None,
                 ref_suffix,
                 ref_target_base,
             })));
@@ -260,8 +249,6 @@ fn compile_recursive_validator<'a>(
         Ok(Some(validator)) => {
             return Ok(Box::new(RefValidator {
                 inner: validator,
-                #[cfg(feature = "python")]
-                prevalidated_schema: None,
                 ref_suffix,
                 ref_target_base,
             }));
@@ -290,8 +277,6 @@ fn compile_recursive_validator<'a>(
         .map(|node| {
             Box::new(RefValidator {
                 inner: Box::new(node),
-                #[cfg(feature = "python")]
-                prevalidated_schema: None,
                 ref_suffix,
                 ref_target_base,
             }) as Box<dyn Validate>
