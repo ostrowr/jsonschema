@@ -165,7 +165,9 @@ pub(crate) trait Validate: Send + Sync {
             // The materialized value is temporary. Its address can be reused by
             // a later fallback, so it must not share pointer-identity caches
             // with the surrounding borrowed-instance traversal.
-            self.is_valid(&instance.to_owned(), &mut ValidationContext::new())
+            instance
+                .try_to_owned()
+                .is_ok_and(|value| self.is_valid(&value, &mut ValidationContext::new()))
         }
     }
 

@@ -770,6 +770,12 @@
 //!
 //! Enable the `arbitrary-precision` feature for exact validation of numbers beyond standard numeric ranges:
 //!
+//! The `jiter` and `python` borrowed-value adapters do not enable this feature.
+//! Without it, schema numbers use `serde_json`'s ordinary bounded representation;
+//! rounding may differ between parsers. Use `InstanceRef::try_to_owned` when
+//! materializing borrowed values that may exceed that range. Allocation-backed
+//! validation fallbacks reject values that cannot be materialized.
+//!
 //! ```toml
 //! jsonschema = { version = "x.y.z", features = ["arbitrary-precision"] }
 //! ```
