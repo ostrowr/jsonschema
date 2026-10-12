@@ -608,10 +608,28 @@ impl<'a> InstanceRef<'a> {
     }
 
     /// Materialize this view as a serde value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a borrowed number exceeds `serde_json`'s numeric range. Enable
+    /// `arbitrary-precision`, or use [`Self::try_to_owned`] to handle this case.
     #[must_use]
     pub fn to_owned(self) -> Value {
+        self.try_to_owned()
+            .expect("borrowed number exceeds serde_json's range; enable arbitrary-precision")
+    }
+
+    /// Materialize this view using `serde_json`'s configured numeric range.
+    ///
+    /// Without `arbitrary-precision`, decimals may round and large numbers may
+    /// fail conversion. Borrowed validation can still inspect native numbers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a borrowed number cannot be represented.
+    pub fn try_to_owned(self) -> Result<Value, serde_json::Error> {
         match self.repr {
-            InstanceRepr::Serde(value) => value.clone(),
+            InstanceRepr::Serde(value) => Ok(value.clone()),
             #[cfg(feature = "jiter")]
             InstanceRepr::Jiter(value) => jiter_to_serde(value),
             #[cfg(feature = "python")]
@@ -1430,14 +1448,14 @@ fn python_integer_to_bigint(value: PythonValue<'_>) -> Option<num_bigint::BigInt
 }
 
 #[cfg(feature = "python")]
-fn python_to_serde(value: PythonValue<'_>) -> Value {
+fn python_to_serde(value: PythonValue<'_>) -> Result<Value, serde_json::Error> {
     let instance = InstanceRef::from_python_value(value);
     borrowed_instance_to_serde(instance)
 }
 
 #[cfg(feature = "python")]
-fn borrowed_instance_to_serde(instance: InstanceRef<'_>) -> Value {
-    if instance.is_null() {
+fn borrowed_instance_to_serde(instance: InstanceRef<'_>) -> Result<Value, serde_json::Error> {
+    Ok(if instance.is_null() {
         Value::Null
     } else if let Some(value) = instance.as_bool() {
         Value::Bool(value)
@@ -1459,51 +1477,55 @@ fn borrowed_instance_to_serde(instance: InstanceRef<'_>) -> Value {
                         rendered
                             .to_str()
                             .expect("Python integer strings are always valid UTF-8"),
-                    )
-                    .expect("Python integer strings are valid JSON numbers")
+                    )?
                 }
             }
             NumberRef::Float(value) => Number::from_f64(value).map_or(Value::Null, Value::Number),
             NumberRef::Serde(value) => Value::Number(value.clone()),
             NumberRef::Integer(value) => Value::Number(Number::from(value)),
             #[cfg(feature = "jiter")]
-            NumberRef::BigInteger(value) => serde_json::from_str(&value.to_string())
-                .expect("borrowed big integers are syntactically valid JSON numbers"),
+            NumberRef::BigInteger(value) => serde_json::from_str(&value.to_string())?,
         }
     } else if let Some(items) = instance.as_array() {
-        Value::Array(items.iter().map(InstanceRef::to_owned).collect())
+        Value::Array(
+            items
+                .iter()
+                .map(InstanceRef::try_to_owned)
+                .collect::<Result<_, _>>()?,
+        )
     } else if let Some(properties) = instance.as_object() {
         Value::Object(
             properties
                 .iter()
-                .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                .collect(),
+                .map(|(key, value)| value.try_to_owned().map(|value| (key.to_owned(), value)))
+                .collect::<Result<_, _>>()?,
         )
     } else {
         Value::Null
-    }
+    })
 }
 
 #[cfg(feature = "jiter")]
-fn jiter_to_serde(value: &jiter::JsonValue<'_>) -> Value {
-    match value {
+fn jiter_to_serde(value: &jiter::JsonValue<'_>) -> Result<Value, serde_json::Error> {
+    Ok(match value {
         jiter::JsonValue::Null => Value::Null,
         jiter::JsonValue::Bool(value) => Value::Bool(*value),
         jiter::JsonValue::Int(value) => Value::Number(Number::from(*value)),
-        jiter::JsonValue::BigInt(value) => serde_json::from_str(&value.to_string())
-            .expect("jiter BigInt is always a syntactically valid JSON number"),
+        jiter::JsonValue::BigInt(value) => serde_json::from_str(&value.to_string())?,
         jiter::JsonValue::Float(value) => {
             Value::Number(Number::from_f64(*value).expect("jiter JSON numbers are always finite"))
         }
         jiter::JsonValue::Str(value) => Value::String(value.to_string()),
-        jiter::JsonValue::Array(items) => Value::Array(items.iter().map(jiter_to_serde).collect()),
+        jiter::JsonValue::Array(items) => {
+            Value::Array(items.iter().map(jiter_to_serde).collect::<Result<_, _>>()?)
+        }
         jiter::JsonValue::Object(properties) => Value::Object(
             properties
                 .iter()
-                .map(|(key, value)| (key.to_string(), jiter_to_serde(value)))
-                .collect(),
+                .map(|(key, value)| jiter_to_serde(value).map(|value| (key.to_string(), value)))
+                .collect::<Result<_, _>>()?,
         ),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1666,6 +1688,65 @@ mod tests {
 
     #[cfg(feature = "jiter")]
     #[test]
+    fn borrowed_jiter_materialization_obeys_numeric_features() {
+        let source = format!(r#"{{"nested":[1{}]}}"#, "0".repeat(400));
+        let parsed = jiter::JsonValue::parse(source.as_bytes(), false).unwrap();
+        let result = InstanceRef::from_jiter(&parsed).try_to_owned();
+        assert_eq!(result.is_ok(), cfg!(feature = "arbitrary-precision"));
+        assert_eq!(
+            borrowed_fallback_validator().is_valid_instance(InstanceRef::from_jiter(&parsed)),
+            cfg!(feature = "arbitrary-precision")
+        );
+        let tiny: Value = serde_json::from_str("1e-400").unwrap();
+        assert_eq!(
+            tiny.to_string(),
+            if cfg!(feature = "arbitrary-precision") {
+                "1e-400"
+            } else {
+                "0.0"
+            }
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[test]
+    fn borrowed_python_materialization_obeys_numeric_features() {
+        pyo3::Python::initialize();
+        pyo3::Python::attach(|py| {
+            let source = format!(r#"{{"nested":[1{}]}}"#, "0".repeat(400));
+            let parsed = py
+                .import("json")
+                .unwrap()
+                .call_method1("loads", (source,))
+                .unwrap();
+            let result = InstanceRef::from_python(&parsed).try_to_owned();
+            assert_eq!(result.is_ok(), cfg!(feature = "arbitrary-precision"));
+            assert_eq!(
+                borrowed_fallback_validator().is_valid_instance(InstanceRef::from_python(&parsed)),
+                cfg!(feature = "arbitrary-precision")
+            );
+        });
+    }
+
+    #[cfg(any(feature = "jiter", feature = "python"))]
+    fn borrowed_fallback_validator() -> crate::Validator {
+        struct AcceptAll;
+        impl crate::Keyword for AcceptAll {
+            fn is_valid(&self, _: &Value) -> bool {
+                true
+            }
+            fn validate<'i>(&self, _: &'i Value) -> Result<(), crate::ValidationError<'i>> {
+                Ok(())
+            }
+        }
+        crate::draft202012::options()
+            .with_keyword("x-fallback", |_, _, _| Ok(Box::new(AcceptAll)))
+            .build(&json!({"x-fallback": true}))
+            .unwrap()
+    }
+
+    #[cfg(feature = "jiter")]
+    #[test]
     fn jiter_view_preserves_json_semantic_equality() {
         let parsed =
             jiter::JsonValue::parse(br#"{"name":"Ada","values":[1,2.0,true,null]}"#, false)
@@ -1725,7 +1806,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "jiter")]
+    #[cfg(all(feature = "jiter", feature = "arbitrary-precision"))]
     #[test]
     fn jiter_numeric_validation_matches_serde_at_large_fractional_boundary() {
         for (schema_source, instance_source, expected) in [
@@ -1765,7 +1846,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "python")]
+    #[cfg(all(feature = "python", feature = "arbitrary-precision"))]
     #[test]
     fn python_numeric_validation_matches_serde_at_large_fractional_boundary() {
         pyo3::Python::initialize();
